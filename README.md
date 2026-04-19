@@ -58,9 +58,39 @@ Both print decreasing training loss and sample text at the end.
 
 The vanilla config is kept tiny because pure-Python matmul is ~1000× slower than NumPy. It exists to prove the autograd mechanics, not to produce coherent text.
 
+## Is this how real LLMs are built?
+
+Architecturally yes, practically no. The math and the data flow match a GPT-style decoder Transformer. The scale, engineering, and training pipeline do not.
+
+**Same as real LLMs:**
+- Decoder-only Transformer with causal self-attention, multi-head attention, pre-norm blocks, residual connections, GELU feed-forward, positional encoding, LM head, softmax + cross-entropy.
+- Training loop: forward → loss → `backward()` → Adam step.
+- Autoregressive generation: sample from `softmax(logits / T)`, append, repeat.
+
+**Different from real LLMs:**
+
+| Concern | this repo | GPT-2+ |
+|---|---|---|
+| Tokenizer | Character-level (28 vocab) | BPE / SentencePiece (~50K vocab) |
+| Dataset | 3 sentences, ~130 tokens | Trillions of tokens, web-scale |
+| Model size | 3K – 70K params | 100M – 1T+ params |
+| Batch size | 1 sequence | Thousands in parallel |
+| Hardware | Single CPU core | 1000s of GPUs/TPUs, mixed precision |
+| Positional encoding | Fixed sinusoidal | Learned, RoPE, or ALiBi |
+| Norm | LayerNorm, pre-norm | RMSNorm + pre-norm |
+| Attention | Naive O(T²) | FlashAttention, KV cache, GQA/MQA |
+| Optimizer | Plain Adam | AdamW + cosine LR + warmup + grad clipping |
+| Regularization | None | Dropout, weight decay, label smoothing |
+| Parallelism | None | Data / tensor / pipeline / sequence parallel |
+| Training signal | Next-token pretrain only | Pretrain + SFT + RLHF / DPO |
+
+Think of this repo as a **working diagram**: every line corresponds to something a real LLM also does, but the real versions operate at a scale orders of magnitude beyond what fits in pure Python.
+
+For the next step up (still readable, but production-grade PyTorch), see Karpathy's `nanoGPT` (~300 lines).
+
 ## Scaling up
 
-To actually get readable generations you need more data and a bigger model. In `numpy_impl/main.py`, bump `d_model`, `num_layers`, `epochs`, and feed a larger text corpus. For anything real (GPT-2+), move to PyTorch/JAX — this repo is a learning exercise, not a training framework.
+To get readable generations here you need more data and a bigger model. In `numpy_impl/main.py`, bump `d_model`, `num_layers`, `epochs`, and feed a larger corpus. For anything real, move to PyTorch/JAX — this repo is a learning exercise, not a training framework.
 
 ## Further reading
 
