@@ -1,21 +1,18 @@
-"""
-Transformer model using NumPy for high performance.
-"""
+"""Transformer language model using the autograd Tensor."""
+
+import math
 
 import numpy as np
-import math
-import random
-from core.tensor import Tensor, tensor
+
+from core.tensor import Tensor
 from core.nn import (
     Module,
     Linear,
     LayerNorm,
-    Dropout,
-    GELU,
     Embedding,
     PositionalEncoding,
     TransformerBlock,
-    Sequential,
+    causal_mask,
 )
 
 
@@ -28,7 +25,7 @@ class Transformer(Module):
         num_layers=4,
         ff_dim=512,
         max_len=512,
-        dropout=0.1,
+        dropout=0.0,
         pad_idx=0,
     ):
         self.vocab_size = vocab_size
@@ -42,111 +39,75 @@ class Transformer(Module):
 
         self.token_embedding = Embedding(vocab_size, d_model)
         self.pos_encoding = PositionalEncoding(d_model, max_len)
-
-        self.layers = []
-        for _ in range(num_layers):
-            self.layers.append(TransformerBlock(d_model, num_heads, ff_dim, dropout))
-
+        self.layers = [
+            TransformerBlock(d_model, num_heads, ff_dim, dropout)
+            for _ in range(num_layers)
+        ]
         self.norm = LayerNorm(d_model)
         self.lm_head = Linear(d_model, vocab_size, bias=False)
 
     def forward(self, x, targets=None):
-        x = self.token_embedding.forward(x)
-        x = self.pos_encoding.forward(x)
+        if x.ndim == 1:
+            x = x.reshape(1, -1)
+        seq_len = x.shape[-1]
+        mask = causal_mask(seq_len)
 
+        h = self.token_embedding.forward(x)
+        h = self.pos_encoding.forward(h)
         for layer in self.layers:
-            x = layer.forward(x)
-
-        x = self.norm.forward(x)
-
-        logits = self.lm_head.forward(x)
+            h = layer.forward(h, mask)
+        h = self.norm.forward(h)
+        logits = self.lm_head.forward(h)
 
         loss = None
         if targets is not None:
-            loss = self._compute_loss(logits, targets)
-
+            t_arr = np.asarray(targets).reshape(-1)
+            loss = logits.cross_entropy(t_arr)
         return logits, loss
-
-    def _compute_loss(self, logits, targets):
-        logits_data = logits.data
-
-        if logits_data.ndim == 3:
-            batch_size, seq_len, vocab_size = logits_data.shape
-        else:
-            seq_len, vocab_size = logits_data.shape
-            batch_size = 1
-            logits_data = logits_data.reshape(1, seq_len, vocab_size)
-
-        log_probs = logits_data - np.max(logits_data, axis=-1, keepdims=True)
-        log_probs = log_probs - np.log(np.exp(log_probs).sum(axis=-1, keepdims=True))
-
-        targets_arr = np.array(targets).reshape(-1)
-
-        if len(targets_arr) > seq_len:
-            targets_arr = targets_arr[:seq_len]
-
-        nll = 0.0
-        for i, target in enumerate(targets_arr):
-            if i < seq_len:
-                nll -= log_probs[0, i, target]
-        nll /= len(targets_arr)
-
-        return Tensor(np.array([[nll]]), requires_grad=True)
 
     def parameters(self):
         params = self.token_embedding.parameters()
-        params.extend(self.pos_encoding.parameters())
         for layer in self.layers:
             params.extend(layer.parameters())
         params.extend(self.norm.parameters())
         params.extend(self.lm_head.parameters())
         return params
 
+    def _children(self):
+        yield self.token_embedding
+        yield self.pos_encoding
+        for layer in self.layers:
+            yield layer
+        yield self.norm
+        yield self.lm_head
+
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+        self.eval()
+        ids = idx.data.astype(np.int64)
+        if ids.ndim == 1:
+            ids = ids.reshape(1, -1)
         for _ in range(max_new_tokens):
-            idx_cond = idx
-            if idx_cond.data.shape[1] > self.max_len:
-                idx_cond = Tensor(
-                    idx_cond.data[:, -self.max_len :], requires_grad=False
-                )
-
-            logits, _ = self.forward(idx_cond)
-
-            logits_data = logits.data
-            if logits_data.ndim == 3:
-                logits = logits_data[0, -1, :] / temperature
-            else:
-                logits = logits_data[-1, :] / temperature
-
-            if top_k is not None:
-                top_indices = np.argsort(logits)[-top_k:]
-                mask = np.full_like(logits, -float("inf"))
-                mask[top_indices] = logits[top_indices]
-                logits = mask
-
-            exp_logits = np.exp(logits - np.max(logits))
+            cond = ids[:, -self.max_len :] if ids.shape[1] > self.max_len else ids
+            logits, _ = self.forward(Tensor(cond, requires_grad=False))
+            next_logits = logits.data[0, -1, :] / max(temperature, 1e-8)
+            if top_k is not None and top_k < next_logits.size:
+                top_idx = np.argpartition(next_logits, -top_k)[-top_k:]
+                mask = np.full_like(next_logits, -np.inf)
+                mask[top_idx] = next_logits[top_idx]
+                next_logits = mask
+            shifted = next_logits - next_logits.max()
+            exp_logits = np.exp(shifted)
             probs = exp_logits / exp_logits.sum()
-
             next_token = np.random.choice(len(probs), p=probs)
-
-            idx = Tensor(
-                np.concatenate([idx_cond.data, [[next_token]]], axis=1),
-                requires_grad=False,
-            )
-
-        return idx
+            ids = np.concatenate([ids, np.array([[next_token]], dtype=np.int64)], axis=1)
+        self.train()
+        return Tensor(ids, requires_grad=False)
 
 
 class GPT2(Module):
     def __init__(
         self, vocab_size=50257, ctx_len=1024, n_layer=12, n_head=12, n_embd=768
     ):
-        self.vocab_size = vocab_size
-        self.ctx_len = ctx_len
-        self.n_layer = n_layer
-        self.n_head = n_head
-        self.n_embd = n_embd
-
         self.transformer = Transformer(
             vocab_size=vocab_size,
             d_model=n_embd,
@@ -154,7 +115,7 @@ class GPT2(Module):
             num_layers=n_layer,
             ff_dim=n_embd * 4,
             max_len=ctx_len,
-            dropout=0.1,
+            dropout=0.0,
         )
 
     def forward(self, x, targets=None):

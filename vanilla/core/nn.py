@@ -1,8 +1,14 @@
-from core.tensor import Tensor, tensor, zeros, ones, randn
+"""Pure-Python neural-network layers built on the autograd Tensor."""
+
 import math
+import random
+
+from core.tensor import Tensor, hconcat, randn, zeros, ones
 
 
 class Module:
+    training = True
+
     def parameters(self):
         return []
 
@@ -10,62 +16,70 @@ class Module:
         for p in self.parameters():
             p.zero_grad()
 
+    def train(self):
+        self.training = True
+        for child in self._children():
+            child.train()
+
+    def eval(self):
+        self.training = False
+        for child in self._children():
+            child.eval()
+
+    def _children(self):
+        for v in vars(self).values():
+            if isinstance(v, Module):
+                yield v
+            elif isinstance(v, (list, tuple)):
+                for item in v:
+                    if isinstance(item, Module):
+                        yield item
+
 
 class Linear(Module):
     def __init__(self, in_features, out_features, bias=True):
         self.in_features = in_features
         self.out_features = out_features
-
         scale = math.sqrt(2.0 / in_features)
-        self.weight = Tensor(randn(in_features, out_features).data, requires_grad=True)
-        self.weight.data = [[x * scale for x in row] for row in self.weight.data]
-
+        w = randn(in_features, out_features)
+        w.data = [[x * scale for x in row] for row in w.data]
+        w.requires_grad = True
+        self.weight = w
         if bias:
-            self.bias = Tensor(zeros(1, out_features).data, requires_grad=True)
+            b = zeros(out_features)
+            b.requires_grad = True
+            self.bias = b
         else:
             self.bias = None
 
-        self._output = None
-
     def forward(self, x):
-        result = x.matmul(self.weight)
-        if self.bias:
-            seq_len = len(result.data)
-            bias_data = [self.bias.data[0] for _ in range(seq_len)]
-            result = result + Tensor(bias_data)
-        self._output = result
-        return result
+        out = x.matmul(self.weight)
+        if self.bias is not None:
+            out = out + self.bias
+        return out
 
     def parameters(self):
-        params = [self.weight]
-        if self.bias:
-            params.append(self.bias)
-        return params
+        return [self.weight] + ([self.bias] if self.bias is not None else [])
 
 
 class LayerNorm(Module):
     def __init__(self, features, eps=1e-5):
         self.features = features
         self.eps = eps
-        self.gamma = Tensor(ones(1, features).data, requires_grad=True)
-        self.beta = Tensor(zeros(1, features).data, requires_grad=True)
+        g = ones(features)
+        g.requires_grad = True
+        b = zeros(features)
+        b.requires_grad = True
+        self.gamma = g
+        self.beta = b
 
     def forward(self, x):
-        mean = sum(x.data[0]) / len(x.data[0])
-        var = sum((x.data[0][i] - mean) ** 2 for i in range(len(x.data[0]))) / len(
-            x.data[0]
-        )
-        std = math.sqrt(var + self.eps)
-
-        result = [
-            [
-                (x.data[0][i] - mean) / std * self.gamma.data[0][i]
-                + self.beta.data[0][i]
-                for i in range(len(x.data[0]))
-            ]
-        ]
-
-        return Tensor(result, requires_grad=x.requires_grad)
+        mean = x.mean(dim=-1, keepdim=True)
+        centered = x - mean
+        var = (centered * centered).mean(dim=-1, keepdim=True)
+        std = (var + self.eps) ** 0.5
+        x_norm = centered / std
+        return self.gamma * x_norm + self.beta
 
     def parameters(self):
         return [self.gamma, self.beta]
@@ -76,67 +90,25 @@ class Dropout(Module):
         self.p = p
 
     def forward(self, x):
-        return x
+        if not self.training or self.p <= 0.0:
+            return x
+        rows, cols = x.shape
+        scale = 1.0 / (1.0 - self.p)
+        mask = [
+            [scale if random.random() >= self.p else 0.0 for _ in range(cols)]
+            for _ in range(rows)
+        ]
+        return x * Tensor(mask, requires_grad=False)
 
 
 class GELU(Module):
     def forward(self, x):
-        result = []
-        for row in x.data:
-            new_row = []
-            for val in row:
-                new_row.append(
-                    0.5
-                    * val
-                    * (
-                        1
-                        + math.tanh(math.sqrt(2 / math.pi) * (val + 0.044715 * val**3))
-                    )
-                )
-            result.append(new_row)
-        return Tensor(result, requires_grad=x.requires_grad)
-
-
-class Softmax(Module):
-    def __init__(self, dim=-1):
-        self.dim = dim
-
-    def forward(self, x):
-        max_vals = [max(row) for row in x.data]
-        exp_data = [
-            [math.exp(val - max_vals[i]) for val in row] for i, row in enumerate(x.data)
-        ]
-        sum_exp = [sum(row) for row in exp_data]
-        result = [[val / sum_exp[i] for val in row] for i, row in enumerate(exp_data)]
-        return Tensor(result, requires_grad=x.requires_grad)
-
-
-class CrossEntropyLoss(Module):
-    def __init__(self):
-        pass
-
-    def forward(self, logits, targets):
-        if len(logits.shape) == 2:
-            logits = logits.view(1, logits.shape[0], logits.shape[1])
-
-        exp_logits = [[math.exp(x) for x in row] for row in logits.data[0]]
-        sum_exp = [sum(row) for row in exp_logits]
-        log_probs = [
-            [x - math.log(s) for x in row] for row, s in zip(exp_logits, sum_exp)
-        ]
-
-        nll = 0.0
-        for i, target in enumerate(targets):
-            target_idx = int(target) if isinstance(target, float) else target
-            nll -= log_probs[i][target_idx]
-        nll /= len(targets)
-
-        return Tensor([[nll]], requires_grad=True)
+        return x.gelu()
 
 
 class Sequential(Module):
     def __init__(self, *layers):
-        self.layers = layers
+        self.layers = list(layers)
 
     def forward(self, x):
         for layer in self.layers:
@@ -149,132 +121,77 @@ class Sequential(Module):
             params.extend(layer.parameters())
         return params
 
+    def _children(self):
+        return iter(self.layers)
+
 
 class Embedding(Module):
     def __init__(self, num_embeddings, embedding_dim):
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
-
-        scale = math.sqrt(1.0 / num_embeddings)
-        self.weight = Tensor(
-            [
-                [(hash((i, j)) % 1000) / 1000.0 * scale for j in range(embedding_dim)]
-                for i in range(num_embeddings)
-            ],
-            requires_grad=True,
-        )
+        scale = 1.0 / math.sqrt(embedding_dim)
+        w = randn(num_embeddings, embedding_dim)
+        w.data = [[x * scale for x in row] for row in w.data]
+        w.requires_grad = True
+        self.weight = w
 
     def forward(self, x):
-        if isinstance(x.data[0], list):
-            indices = [int(i) for i in x.data[0]]
-        else:
-            indices = [int(i) for i in x.data]
-
-        result = []
-        for idx in indices:
-            if idx < self.num_embeddings:
-                result.append(self.weight.data[idx])
-            else:
-                result.append([0.0] * self.embedding_dim)
-
-        return Tensor(result, requires_grad=x.requires_grad)
+        return x.embedding_select(self.weight)
 
     def parameters(self):
         return [self.weight]
 
 
 class PositionalEncoding(Module):
-    def __init__(self, d_model, max_len=5000):
+    def __init__(self, d_model, max_len=512):
         self.d_model = d_model
-
         pe = [[0.0 for _ in range(d_model)] for _ in range(max_len)]
         for pos in range(max_len):
             for i in range(0, d_model, 2):
-                pe[pos][i] = math.sin(pos / (10000 ** (2 * i / d_model)))
+                angle = pos / (10000 ** (i / d_model))
+                pe[pos][i] = math.sin(angle)
                 if i + 1 < d_model:
-                    pe[pos][i + 1] = math.cos(pos / (10000 ** (2 * i / d_model)))
-
-        self.pe = Tensor(pe, requires_grad=False)
+                    pe[pos][i + 1] = math.cos(angle)
+        self.pe = pe
 
     def forward(self, x):
-        if isinstance(x.data[0], list):
-            seq_len = len(x.data[0])
-        else:
-            seq_len = 1
-
-        pe_slice = [self.pe.data[i][: self.d_model] for i in range(seq_len)]
-        pe_tensor = Tensor(pe_slice, requires_grad=False)
-
-        return x + pe_tensor
+        seq_len = x.shape[0]
+        pe_slice = [self.pe[i][:] for i in range(seq_len)]
+        return x + Tensor(pe_slice, requires_grad=False)
 
 
 class MultiHeadAttention(Module):
-    def __init__(self, d_model, num_heads, dropout=0.1):
+    def __init__(self, d_model, num_heads, dropout=0.0):
         assert d_model % num_heads == 0
-
         self.d_model = d_model
         self.num_heads = num_heads
         self.d_k = d_model // num_heads
-
         self.W_q = Linear(d_model, d_model)
         self.W_k = Linear(d_model, d_model)
         self.W_v = Linear(d_model, d_model)
         self.W_o = Linear(d_model, d_model)
 
-        self.softmax = Softmax()
-        self.dropout = Dropout(dropout)
-
     def forward(self, query, key, value, mask=None):
-        batch_size = 1
-        seq_len = len(query.data[0]) if isinstance(query.data[0], list) else 1
-
         Q = self.W_q.forward(query)
         K = self.W_k.forward(key)
         V = self.W_v.forward(value)
+        scale = 1.0 / math.sqrt(self.d_k)
 
-        Q = self._reshape(Q)
-        K = self._reshape(K)
-        V = self._reshape(V)
+        head_outputs = []
+        for h in range(self.num_heads):
+            start = h * self.d_k
+            end = start + self.d_k
+            q_h = Q.col_slice(start, end)
+            k_h = K.col_slice(start, end)
+            v_h = V.col_slice(start, end)
+            scores = q_h.matmul(k_h.T()) * scale
+            if mask is not None:
+                scores = scores.masked_fill(mask, -1e9)
+            attn = scores.softmax(dim=-1)
+            head_outputs.append(attn.matmul(v_h))
 
-        scores = Q.matmul(K.T())
-        scores = scores / math.sqrt(self.d_k)
-
-        if mask:
-            for i in range(len(scores.data)):
-                for j in range(len(scores.data[0])):
-                    if j > i:
-                        scores.data[i][j] = -1e9
-
-        attn_weights = self.softmax.forward(scores)
-        attn_weights = self.dropout.forward(attn_weights)
-
-        context = attn_weights.matmul(V)
-        context = self._reshape_back(context)
-
-        output = self.W_o.forward(context)
-        return output
-
-    def _reshape(self, x):
-        seq_len = len(x.data[0]) if isinstance(x.data[0], list) else 1
-        result = []
-        for i in range(seq_len):
-            row = []
-            for head in range(self.num_heads):
-                for j in range(self.d_k):
-                    row.append(x.data[i][head * self.d_k + j])
-            result.append(row)
-        return Tensor(result, requires_grad=x.requires_grad)
-
-    def _reshape_back(self, x):
-        seq_len = len(x.data) if isinstance(x.data[0], list) else 1
-        result = []
-        for i in range(seq_len):
-            row = []
-            for head in range(self.num_heads):
-                for j in range(self.d_k):
-                    row.append(x.data[i][head * self.d_k + j])
-            result.append(row)
-        return Tensor(result, requires_grad=x.requires_grad)
+        concat = hconcat(head_outputs) if len(head_outputs) > 1 else head_outputs[0]
+        return self.W_o.forward(concat)
 
     def parameters(self):
         return (
@@ -286,21 +203,20 @@ class MultiHeadAttention(Module):
 
 
 class TransformerBlock(Module):
-    def __init__(self, d_model, num_heads, ff_dim, dropout=0.1):
+    def __init__(self, d_model, num_heads, ff_dim, dropout=0.0):
         self.attention = MultiHeadAttention(d_model, num_heads, dropout)
         self.norm1 = LayerNorm(d_model)
         self.norm2 = LayerNorm(d_model)
         self.ff = Sequential(
-            Linear(d_model, ff_dim), GELU(), Linear(ff_dim, d_model), Dropout(dropout)
+            Linear(d_model, ff_dim),
+            GELU(),
+            Linear(ff_dim, d_model),
         )
 
     def forward(self, x, mask=None):
-        attn_output = self.attention.forward(x, x, x, mask)
-        x = self.norm1.forward(x + attn_output)
-
-        ff_output = self.ff.forward(x)
-        x = self.norm2.forward(x + ff_output)
-
+        h = self.norm1.forward(x)
+        x = x + self.attention.forward(h, h, h, mask)
+        x = x + self.ff.forward(self.norm2.forward(x))
         return x
 
     def parameters(self):
@@ -310,3 +226,8 @@ class TransformerBlock(Module):
             + self.norm2.parameters()
             + self.ff.parameters()
         )
+
+
+def causal_mask(seq_len):
+    """2-D boolean mask: True = position should be zeroed out."""
+    return [[j > i for j in range(seq_len)] for i in range(seq_len)]

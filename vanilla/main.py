@@ -1,43 +1,30 @@
-"""
-Vanilla LLM - Pure Python (No Dependencies)
-Run this to train and generate text using pure Python implementation.
-"""
+"""Pure-Python LLM - trains a tiny Transformer and samples text."""
 
-import sys
+import math
 import os
+import random
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from core.tensor import Tensor, randn
-from core.nn import (
-    Linear,
-    LayerNorm,
-    Dropout,
-    GELU,
-    Embedding,
-    TransformerBlock,
-    Sequential,
-)
-from core.optim import Adam, SGD
-from model.transformer import Transformer, GPT2Small, create_gpt_config
+from core.optim import Adam
+from core.tensor import Tensor
 from data.tokenizer import SimpleTokenizer
-import random
-import math
+from model.transformer import Transformer
 
 
-SAMPLE_TEXT = """
-In the beginning there was darkness. Then came light. The light brought with it hope and possibility. 
-For thousands of years, humanity has strived to understand the universe and our place within it. 
-We built cities, created art, discovered science, and dreamed of futures beyond our imagination.
-Every day presents new opportunities to learn, grow, and make a positive impact on the world around us.
-The journey of a thousand miles begins with a single step. Together, we can accomplish great things.
-Knowledge is power. Education is the key to unlocking human potential. Let us learn and grow together.
-"""
+SAMPLE_TEXT = (
+    "the quick brown fox jumps over the lazy dog. "
+    "the quick brown fox is quick and brown. "
+    "the lazy dog sleeps under the old oak tree. "
+)
 
 
 def main():
+    random.seed(0)
+
     print("=" * 60)
-    print("Building LLM from Scratch - Pure Python (No Dependencies)")
+    print("Building LLM from Scratch - Pure Python (no dependencies)")
     print("=" * 60)
 
     print("\n[1/5] Initializing tokenizer...")
@@ -50,104 +37,61 @@ def main():
     encoded = tokenizer.encode(SAMPLE_TEXT)
     print(f"   Total tokens: {len(encoded)}")
 
-    print("\n[3/5] Creating Transformer model...")
+    print("\n[3/5] Creating tiny Transformer model...")
     model = Transformer(
         vocab_size=vocab_size,
-        d_model=128,
-        num_heads=4,
-        num_layers=2,
-        ff_dim=256,
-        max_len=128,
-        dropout=0.1,
+        d_model=16,
+        num_heads=2,
+        num_layers=1,
+        ff_dim=32,
+        max_len=16,
+        dropout=0.0,
     )
-
     params = model.parameters()
-    print(f"   Model parameters: {len(params)}")
+    total = sum(
+        (len(p.data) * len(p.data[0])) if isinstance(p.data[0], list) else len(p.data)
+        for p in params
+    )
+    print(f"   Parameter tensors: {len(params)}  |  scalars: {total}")
 
     print("\n[4/5] Setting up optimizer...")
-    optimizer = Adam(params, lr=0.001)
+    optimizer = Adam(params, lr=5e-3)
 
-    print("\n[5/5] Training the model...")
+    print("\n[5/5] Training (this is pure Python, so slow)...")
     epochs = 20
-    batch_size = 3
-    seq_len = 16
-
-    print(f"\n   Training for {epochs} epochs...")
-    print("-" * 40)
+    steps_per_epoch = 4
+    seq_len = 8
 
     for epoch in range(epochs):
         total_loss = 0.0
-        num_batches = 0
-
-        for _ in range(batch_size):
+        for _ in range(steps_per_epoch):
             if len(encoded) < seq_len + 1:
-                continue
+                break
+            start = random.randint(0, len(encoded) - seq_len - 1)
+            input_seq = encoded[start : start + seq_len]
+            target_seq = encoded[start + 1 : start + seq_len + 1]
 
-            random_start = random.randint(0, len(encoded) - seq_len - 1)
-
-            input_seq = encoded[random_start : random_start + seq_len]
-            target_seq = encoded[random_start + 1 : random_start + seq_len + 1]
-
-            input_tensor = Tensor([input_seq], requires_grad=True)
-
+            x = Tensor([input_seq], requires_grad=False)
             optimizer.zero_grad()
+            _, loss = model.forward(x, target_seq)
+            total_loss += loss.data[0][0]
+            loss.backward()
+            optimizer.step()
 
-            logits, loss = model.forward(input_tensor, target_seq)
-
-            if loss and loss.data:
-                loss_val = (
-                    loss.data[0][0] if isinstance(loss.data[0], list) else loss.data[0]
-                )
-                total_loss += loss_val
-                num_batches += 1
-
-                try:
-                    loss.backward()
-                    optimizer.step()
-                except:
-                    pass
-
-        avg_loss = total_loss / max(1, num_batches)
-        perplexity = math.exp(avg_loss)
-
-        if (epoch + 1) % 5 == 0 or epoch == 0:
+        avg_loss = total_loss / steps_per_epoch
+        if (epoch + 1) % 2 == 0 or epoch == 0:
             print(
-                f"   Epoch {epoch + 1:3d}/{epochs} | Loss: {avg_loss:.4f} | PPL: {perplexity:.2f}"
+                f"   Epoch {epoch + 1:3d}/{epochs} | Loss: {avg_loss:.4f} | PPL: {math.exp(avg_loss):.2f}"
             )
 
-    print("-" * 40)
-    print("\nTraining complete!")
-
-    print("\n[Generating Text]")
-    print("-" * 40)
-
-    start_prompt = "In the beginning"
-
-    try:
-        input_ids = tokenizer.encode(start_prompt)
-        input_tensor = Tensor([input_ids], requires_grad=False)
-
-        result = model.generate(
-            input_tensor, max_new_tokens=50, temperature=0.8, top_k=40
-        )
-
-        output_ids = result.data[0]
-        output_ids = [int(x) for x in output_ids]
-
-        generated_text = tokenizer.decode(output_ids)
-
-        print(f"Input:  {start_prompt}")
-        print(f"Output: {generated_text}")
-
-    except Exception as e:
-        print(f"Generation error: {e}")
-        print("Text generation completed with warnings.")
-
-    print("\n" + "=" * 60)
-    print("LLM Training Complete!")
-    print("=" * 60)
-    print("\nThis is the PURE PYTHON version (no dependencies)")
-    print("For faster training, use numpy_impl version")
+    print("\n[Generating]")
+    start_prompt = "the quick"
+    input_ids = tokenizer.encode(start_prompt)
+    x = Tensor([input_ids], requires_grad=False)
+    result = model.generate(x, max_new_tokens=30, temperature=0.8, top_k=5)
+    output_ids = [int(v) for v in result.data[0]]
+    print(f"Input:  {start_prompt}")
+    print(f"Output: {tokenizer.decode(output_ids)}")
 
 
 if __name__ == "__main__":
