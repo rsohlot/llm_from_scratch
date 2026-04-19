@@ -1,2 +1,2 @@
 # Production LLM dependencies
-numpy>=1.20.0
+numpy==2.2.6
