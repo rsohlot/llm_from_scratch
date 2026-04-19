@@ -1,0 +1,1 @@
+# Vanilla implementation - no dependencies
