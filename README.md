@@ -1,74 +1,67 @@
 # Build Your Own LLM from Scratch
 
-A production-ready Transformer (GPT-style) implementation built from scratch using only NumPy.
+A GPT-style Transformer built from scratch in two flavors: pure Python (no deps) and NumPy. Both ship a small reverse-mode autograd engine and actually train — loss decreases end-to-end.
 
 ## Project Structure
 
 ```
 llm_from_scratch/
-├── core/
-│   ├── tensor_numpy.py    # Tensor operations (NumPy-backed)
-│   ├── nn_numpy.py        # Neural network layers
-│   └── optim_numpy.py     # Optimizers (SGD, Adam, AdamW)
-├── data/
-│   └── tokenizer.py       # Character-level tokenizer
-├── model/
-│   └── transformer_numpy.py # Full Transformer model
-├── visual_learning/       # Interactive visualizations
-├── main_numpy.py          # Training script
-├── EXECUTION_FLOW.md      # Code execution flow explanation
-└── requirements.txt       # Dependencies (NumPy only!)
+├── vanilla/                   # Pure-Python implementation (no dependencies)
+│   ├── core/
+│   │   ├── tensor.py          # Autograd-enabled Tensor (nested-list backend)
+│   │   ├── nn.py              # Linear, LayerNorm, GELU, Dropout, Embedding, MHA, ...
+│   │   └── optim.py           # SGD, Adam, AdamW
+│   ├── data/
+│   │   └── tokenizer.py       # Character-level + BPE tokenizers
+│   ├── model/
+│   │   └── transformer.py     # Tiny Transformer language model
+│   └── main.py                # Train + sample entry point
+├── numpy_impl/                # NumPy-backed implementation (fast)
+│   ├── core/{tensor,nn,optim}.py
+│   ├── data/tokenizer.py
+│   ├── model/transformer.py
+│   └── main.py
+├── EXECUTION_FLOW.md          # Architectural walkthrough
+├── LICENSE                    # MIT
+└── requirements.txt           # numpy (for numpy_impl only)
 ```
 
 ## Quick Start
 
 ```bash
-# Install dependencies
-pip install numpy
+# Pure Python — no dependencies. Tiny model, trains in seconds.
+python vanilla/main.py
 
-# Run training
-python main_numpy.py
+# NumPy-backed — larger model, faster training.
+pip install -r requirements.txt
+python numpy_impl/main.py
 ```
 
-## Understanding the Code
+Both print decreasing training loss and sample text at the end.
 
-**Start here:** Read [EXECUTION_FLOW.md](EXECUTION_FLOW.md) for a detailed explanation of:
-- How data flows through the network
-- What each component does
-- Training vs inference
+## What's implemented
 
-**Interactive visualizations:**
-```bash
-python visual_learning/transformer_visual.py  # Step-by-step with actual numbers
-```
+- **Autograd**: reverse-mode with topological sort; every op records parents and a `_backward` closure. Gradients flow through matmul, broadcast add/mul/div, pow, exp, log, softmax, GELU, fused log-softmax + cross-entropy, embedding lookup, column slicing + concat (for multi-head attention), and masked-fill (for causal masking).
+- **Transformer**: pre-norm blocks with multi-head self-attention, causal mask, feed-forward with GELU, sinusoidal positional encoding, inverted-dropout Dropout, weight-tied-optional LM head.
+- **Optimizers**: SGD (with momentum), Adam, AdamW.
 
-## Architecture (Same as GPT-2)
+## Default configs
 
-- **Multi-head Self-Attention**: 8 heads, 256 dim
-- **Feed-Forward Network**: GELU activation, 512 hidden dim
-- **Layer Normalization**: Pre-norm architecture
-- **Positional Encoding**: Sinusoidal
-- **Token Embeddings**: Learned embeddings
+| | vanilla | numpy_impl |
+|---|---|---|
+| d_model | 16 | 64 |
+| heads | 2 | 4 |
+| layers | 1 | 2 |
+| seq_len | 8 | 32 |
+| epochs | 20 | 50 |
+| params | ~3K | ~70K |
 
-## Performance
+The vanilla config is kept tiny because pure-Python matmul is ~1000× slower than NumPy. It exists to prove the autograd mechanics, not to produce coherent text.
 
-- Uses NumPy with SIMD optimizations (100-1000x faster than pure Python)
-- Full gradient computation
-- Adam optimizer with weight decay
+## Scaling up
 
-## To Train on Your Data
+To actually get readable generations you need more data and a bigger model. In `numpy_impl/main.py`, bump `d_model`, `num_layers`, `epochs`, and feed a larger text corpus. For anything real (GPT-2+), move to PyTorch/JAX — this repo is a learning exercise, not a training framework.
 
-1. Replace `SAMPLE_TEXT` in `main_numpy.py` with your dataset
-2. Increase `epochs`, `batch_size`, `seq_len`
-3. For better results, increase model dimensions:
-   - `d_model=512`, `num_heads=16`, `num_layers=6`
+## Further reading
 
-## For Production-Scale
-
-For actual GPT-3/4 scale training, you would need:
-- **PyTorch/JAX** - for automatic differentiation & GPU acceleration
-- **DeepSpeed/Megatron** - for distributed training
-- **Gradient checkpointing** - to save memory
-- **Mixed precision** - for faster training
-
-This codebase demonstrates the **core algorithm** - all production systems use these same concepts!
+See [EXECUTION_FLOW.md](EXECUTION_FLOW.md) for the data flow through the network and what each layer does.
